@@ -1,43 +1,41 @@
 # codepath-ai301-opensource-capstone
-# Contribution 1: Add a PostgreSQL connector for Moss (usemoss/moss #168)
+# Contribution 1: Support testing Megatron code as an inference engine (radixark/miles #400)
 
 **Contribution Number:** 1  
 **Student:** Ruobing Han
-**Issue:** https://github.com/usemoss/moss/issues/168  
+**Issue:** https://github.com/radixark/miles/issues/400  
 **Status:** Phase I Complete
 
 ---
 
 ## Why I Chose This Issue
 
-I chose issue #168, "Add moss-connector-postgres," in
-[usemoss/moss](https://github.com/usemoss/moss) because it is a clean, well-scoped
-first contribution in an emerging AI-infrastructure project that I can complete
-confidently while still learning something real. Moss is a local, embedded
-retrieval/search layer for production AI — sub-10ms hybrid (semantic + keyword)
-search with no separate vector database — i.e. the retrieval substrate that RAG and
-agent systems depend on. It is young (created Oct 2025), YC-backed, and actively
-developed, which is exactly the kind of promising new project I joined this program
-to contribute to.
+I chose issue #400, "Support testing Megatron code as an inference engine," in
+[radixark/miles](https://github.com/radixark/miles) because it sits exactly at the
+intersection of my background and where I want to grow: ML systems and LLM
+post-training. Miles is an emerging, fast-moving RL post-training framework (backed
+by InfiXAI, Ant Group, and the SGLang RL team) that couples SGLang for rollout with
+Megatron-LM for training — the kind of large, promising new project I joined this
+program to contribute to.
 
 I'm interested in this because:
-1. Retrieval / RAG infrastructure is adjacent to my target areas (ML infra and
-   agent/LLM development), so the work builds directly toward where I want to grow.
-2. The scope is bounded and pattern-based: Moss already ships several connectors, so
-   this issue is "add one more" — copy the connector template, implement iteration
-   over a PostgreSQL source via psycopg (v3), and add tests and a short README.
-   There is a clear "done" and an existing pattern to mirror.
-3. It is pure Python and lives in an isolated connector package, so I can be
-   productive without first having to understand the entire codebase — a good fit
-   for my first open-source PR.
-4. I want to learn how a production retrieval layer ingests and syncs external data
-   sources, and writing a connector is the most direct way to learn that.
+1. Post-training / RL infrastructure is my primary target area. I recently
+   implemented the qwen3-next attention stack (linear attention + DeltaNet), so I'm
+   comfortable reading LLM internals.
+2. The issue is an additive enhancement with a contained surface: expose Megatron's
+   existing inference path so it can be used as an inference engine for
+   testing/evaluation, rather than a from-scratch rewrite.
+3. The contribution can be validated on a single GPU with a small model, so it fits
+   the hardware I can reliably access (a 3090 cluster) without needing scarce
+   large-GPU time.
+4. I want to learn how modern RLHF stacks wire rollout (SGLang) and training
+   (Megatron) together, and this issue forces me to understand that boundary.
 
-What "fixed" looks like: Moss gains a working PostgreSQL connector that pulls rows
-from a Postgres database into Moss so they can be indexed and searched, following
-the existing connector interface, with tests and documentation. I have reached out
-on the issue to confirm it is unclaimed and to check the contribution requirements
-(the issue mentions a short demo video and a CLA).
+What "fixed" looks like: Megatron's inference can be driven through a standard
+(OpenAI-compatible) interface and validated against evals, giving contributors a
+Megatron-native inference path for testing. I have reached out on the issue to
+confirm it is unclaimed (the only prior interest went quiet ~5 months ago) and to
+pin down the acceptance criteria with the maintainers.
 
 ---
 
@@ -45,12 +43,11 @@ on the issue to confirm it is unclaimed and to check the contribution requiremen
 
 ### Problem Description
 
-Moss is an embedded retrieval/search layer that indexes data through "connectors,"
-each of which pulls records from a specific source into Moss. Today there is no
-connector for PostgreSQL, so users cannot index data that lives in a Postgres
-database. This issue asks for a new `moss-connector-postgres` package that reads
-rows from PostgreSQL (via psycopg) and feeds them into Moss, mirroring the existing
-connectors, with tests and a README.
+Miles can train models with Megatron-LM and serve rollouts with SGLang, but there
+is currently no supported way to use Megatron itself as an inference engine. This
+makes it harder to validate Megatron-side behavior and run evaluations without
+routing through SGLang. The issue asks to wire Megatron's existing inference code
+behind a standard inference interface so it can be exercised directly for testing.
 
 ### Expected Behavior
 
