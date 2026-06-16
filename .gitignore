@@ -1,2 +1,19 @@
 CLAUDE.md
 .env
+w1/
+
+# General macOS files
+.DS_Store
+.localized
+__MACOSX/
+
+# Resource forks and metadata
+._*
+
+# Files that may appear on external volumes or network shares
+.Spotlight-V100
+.Trashes
+.fseventsd
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.apdisk

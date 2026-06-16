@@ -4,7 +4,7 @@
 **Contribution Number:** 1  
 **Student:** Ruobing Han
 **Issue:** https://github.com/radixark/miles/issues/400  
-**Status:** Phase I Complete
+**Status:** Phase II Complete (Reproduce & Plan)
 
 ---
 
@@ -26,8 +26,7 @@ I'm interested in this because:
    existing inference path so it can be used as an inference engine for
    testing/evaluation, rather than a from-scratch rewrite.
 3. The contribution can be validated on a single GPU with a small model, so it fits
-   the hardware I can reliably access (a 3090 cluster) without needing scarce
-   large-GPU time.
+   the hardware I can reliably access without needing scarce large-GPU time.
 4. I want to learn how modern RLHF stacks wire rollout (SGLang) and training
    (Megatron) together, and this issue forces me to understand that boundary.
 
@@ -41,6 +40,10 @@ pin down the acceptance criteria with the maintainers.
 
 ## Understanding the Issue
 
+> **Note on issue type.** #400 is labeled `enhancement` + `help wanted`, not a bug.
+> "Reproducing" it means showing that the requested capability is *absent*, not
+> triggering a crash.
+
 ### Problem Description
 
 Miles can train models with Megatron-LM and serve rollouts with SGLang, but there
@@ -49,17 +52,38 @@ makes it harder to validate Megatron-side behavior and run evaluations without
 routing through SGLang. The issue asks to wire Megatron's existing inference code
 behind a standard inference interface so it can be exercised directly for testing.
 
+Maintainer scope signals from the issue thread:
+- `gongyisheng` pointed at Megatron-LM's own inference test
+  (`tests/unit_tests/test_inference.py`) and asked "will it be enough to use?" —
+  i.e. reuse Megatron's existing inference stack rather than build a new one.
+- `fzyzcjy` (author) clarified the target: "a reasonably fast one w/ openai
+  endpoint etc, i.e. the normal requirements."
+
 ### Expected Behavior
 
-[What should happen?]
+A contributor should be able to take a model that miles built with Megatron-LM and
+**generate text from it directly** (autoregressive decoding) for testing/evaluation
+— ideally behind an OpenAI-compatible endpoint — without standing up a separate
+SGLang server.
 
 ### Current Behavior
 
-[What actually happens?]
+All generation in miles is delegated to SGLang. The Megatron side only does
+training and no-grad forward passes (for log-probs). There is no autoregressive
+generation, no sampling loop, and no Megatron inference engine wired up. The
+OpenAI-compatible API is SGLang's own server; miles only puts a load-balancing
+proxy in front of it.
 
 ### Affected Components
 
-[Which parts of the codebase are involved?]
+- `miles/rollout/generate_hub/` — the low-level `generate()` path (SGLang HTTP).
+- `miles/backends/megatron_utils/` — Megatron model setup + `forward_only()`; the
+  natural home for a new inference path.
+- `miles_plugins/models/hf_attention.py` — already imports
+  `megatron.core.inference.contexts.BaseInferenceContext` as a *type*, so the model
+  layers are already inference-context-aware (a useful building block).
+- `tests/e2e/megatron/` — where a new Megatron inference test would live.
+- `miles/router/` — SGLang reverse proxy (pattern to reuse for an endpoint later).
 
 ---
 
@@ -67,19 +91,88 @@ behind a standard inference interface so it can be exercised directly for testin
 
 ### Environment Setup
 
-[Notes on setting up your local development environment - challenges you faced, how you solved them]
+The project is Docker-first (`radixark/miles:dev`), but the GPU server I work on
+has no container runtime, and installing a system Docker daemon on a shared,
+multi-tenant training box is not acceptable. I therefore reproduced the runtime in
+a conda env (`mega`, Python 3.12) by mirroring the project's `docker/Dockerfile`.
+
+The one thing that actually matters is ABI alignment — miles pins patched, prebuilt
+CUDA-13 kernels, so the torch version has to match them exactly (the docs call a
+mismatch the "#1 source of bug reports"). The recipe that worked:
+
+1. `torch==2.11.0` + cu130 (matches sglang v0.5.12's pin; the cu130 wheels are
+   `manylinux_2_28`).
+2. Prebuilt `cp312` wheels installed `--no-deps` from the
+   `yueming-yuan/miles-wheels@cu130-x86_64-v0.5.12` release: `flash-attn` 2.7.4,
+   `apex`, `transformer_engine` (+ `transformer_engine_torch`), plus
+   `transformer_engine_cu13==2.12.0` (the compiled libs, from PyPI) and `onnxscript`.
+3. Megatron-LM `radixark/Megatron-LM@miles-main` (megatron-core 0.16.0rc0),
+   `pip install -e . --no-deps`.
+4. miles: `pip install -r requirements.txt` with torch pinned via a `--constraint`
+   file (so `torchft-nightly` can't pull a different torch), then re-force
+   `numpy<2`, then `pip install -e . --no-deps`.
+
+Challenges and how I solved them:
+- **No Docker on a shared box** → mirrored the Dockerfile into the `mega` conda env.
+- **ABI mismatch risk** → pinned torch to exactly `2.11.0/cu130` to match the wheels;
+  `flash-attn`, `transformer_engine` (incl. FP8), and `apex` all verified on an H100.
+- **`torchft-nightly` tried to move torch** → installed requirements with a torch
+  `--constraint`.
+- **transitive deps bumped numpy to 2.x** → re-pinned `numpy<2` afterward.
+- **JuiceFS is slow for many-small-file installs** → torch/TE installs take a while;
+  expect minutes, not seconds.
+
+Result: `import miles` works from any directory, and a single-GPU smoke test drives
+Megatron's own inference engine end-to-end with **no SGLang installed** (see
+Reproduction Evidence). SGLang is intentionally omitted — it is not needed for
+Megatron-native inference.
 
 ### Steps to Reproduce
 
-1. [Step 1]
-2. [Step 2]
-3. [Observed result]
+Reproducing this enhancement means showing, on demand, that miles has no supported
+way to run Megatron as an inference engine. A dependency-free script does this by
+inspecting the source (`w2/repro/reproduce_issue_400.py`, no GPU required):
+
+1. From this repo, run:
+   ```bash
+   python w2/repro/reproduce_issue_400.py --miles-root /path/to/miles
+   ```
+2. The script confirms three conditions, all of which hold today:
+   1. **Generation goes only through SGLang** — the generate path posts to SGLang's
+      HTTP `/generate` endpoint (`miles/rollout/generate_hub/single_turn.py:20,43`,
+      `.../multi_turn.py:31`).
+   2. **No Megatron inference engine is used** — none of
+      `StaticInferenceEngine` / `DynamicInferenceEngine` /
+      `TextGenerationController` / `GPTInferenceWrapper` appears anywhere; the only
+      `megatron.core.inference` reference is a type-only import
+      (`miles_plugins/models/hf_attention.py:6`).
+   3. **No CLI flag selects Megatron as the inference engine** — only generic
+      python-path overrides exist (`miles/utils/arguments.py:284,447`), and both
+      default to SGLang.
+3. **Expected (desired):** a supported way to generate text from miles' Megatron
+   model. **Actual:** none — generation requires SGLang.
+4. The check is static source inspection, so it reproduces identically on every run.
+
+Manual cross-check (no script):
+```bash
+grep -rn "core.inference\|TextGenerationController\|InferenceEngine" miles/ miles_plugins/
+grep -n "/generate" miles/rollout/generate_hub/single_turn.py
+```
 
 ### Reproduction Evidence
 
-- **Commit showing reproduction:** [Link to commit in your fork]
-- **Screenshots/logs:** [If applicable]
-- **My findings:** [What you discovered during reproduction]
+- **Working branch (my fork):** https://github.com/hrb0755/miles/tree/fix-issue-400
+- **Reproduction script:** `w2/repro/reproduce_issue_400.py` → prints
+  `GAP REPRODUCED` (exit 0).
+- **Findings:** miles' generation is SGLang-only; the Megatron side has model setup
+  + `forward_only()` (`miles/backends/megatron_utils/model.py:193-325`) but no
+  autoregressive generation.
+- **Feasibility, verified:** I confirmed the fix is *integration, not a rewrite* by
+  running Megatron-LM's own inference stack standalone on one H100 —
+  `GPTInferenceWrapper` → `TextGenerationController` → `StaticInferenceEngine`
+  generating tokens from a small model, **with no SGLang**
+  (`w2/repro/megatron_inference_smoke.py`, requires the full `mega` env). This is
+  the exact API the contribution will wire miles' model into.
 
 ---
 
@@ -87,30 +180,72 @@ behind a standard inference interface so it can be exercised directly for testin
 
 ### Analysis
 
-[Your analysis of the root cause - what's causing the issue?]
+The root cause is a missing capability, not a defect: miles never constructs or
+drives Megatron-LM's inference engine. Generation is implemented exclusively as an
+HTTP call into SGLang (`miles/rollout/generate_hub/single_turn.py:20,43`), and the
+Megatron actor only ever runs a no-grad forward for log-probs
+(`miles/backends/megatron_utils/model.py:193-325`) — there is no sampling loop, KV
+cache, or engine wrapper on the Megatron model.
 
 ### Proposed Solution
 
-[High-level description of your fix approach]
+Wire miles' already-built Megatron model into Megatron-LM's existing inference stack
+(`megatron.core.inference`: `GPTInferenceWrapper` → `TextGenerationController` →
+`StaticInferenceEngine`) and add a small single-GPU test that drives it. Keep the
+first version testable on one GPU with a small model (TP=PP=1, basic sampling);
+defer distributed (TP/PP) generation and the OpenAI-compatible endpoint to
+follow-ups, confirming acceptance criteria with maintainers first.
 
 ### Implementation Plan
 
-Using UMPIRE framework (adapted):
+Using the UMPIRE framework:
 
-**Understand:** [Restate the problem]
+**Understand:** miles can train with Megatron-LM but can only generate text through
+SGLang. There is no supported path to drive miles' Megatron model as an inference
+engine for testing/eval. #400 asks to add one (ideally fast, with an OpenAI
+endpoint).
 
-**Match:** [What similar patterns/solutions exist in the codebase?]
+**Match:**
+- Megatron-LM ships a complete inference stack in `megatron.core.inference`
+  (`GPTInferenceWrapper`, `TextGenerationController`, `StaticInferenceEngine`) plus
+  a reference test `tests/unit_tests/test_inference.py` — the maintainer pointed
+  here, and I have run this stack directly (see Reproduction Evidence).
+- miles already builds the Megatron GPT model and parallel state
+  (`miles/backends/megatron_utils/model.py`, `initialize.py`, `parallel.py`) and
+  runs no-grad forwards (`forward_only`, `model.py:193-325`).
+- miles' attention already accepts a `BaseInferenceContext`
+  (`miles_plugins/models/hf_attention.py:180`).
+- The SGLang integration shows the rollout/endpoint seam to reuse later
+  (`miles/ray/rollout/rollout_server.py`, `miles/router/router.py`, and the
+  `--custom-generate-function-path` hook at `miles/utils/arguments.py:447`).
+- `tests/e2e/sglang/test_chat_input_ids_equivalence.py` is a template for
+  validating a new engine's output by equivalence.
 
-**Plan:** [Step-by-step implementation plan]
-1. [Modify file X to do Y]
-2. [Add function Z]
-3. [Update tests]
+**Plan (minimal, test-first):**
+1. Add `miles/backends/megatron_utils/inference.py` that, given miles' built model
+   + parallel state, constructs `GPTInferenceWrapper` → `TextGenerationController`
+   → `StaticInferenceEngine`.
+2. Expose a minimal `generate(prompts, sampling_params)` helper returning
+   tokens/text (greedy + basic temperature/top-p first).
+3. Add a single-GPU, tiny-model test under `tests/e2e/megatron/` (mirroring
+   upstream `test_inference.py`) that generates via the Megatron engine and
+   validates the output. Register it with `register_cuda_ci(...)`.
+4. Keep v1 at TP=1, PP=1, small model; document distributed generation and the
+   OpenAI-compatible endpoint as explicit follow-ups.
 
-**Implement:** [Link to your branch/commits as you work]
+**Implement:** Phase III, on branch
+https://github.com/hrb0755/miles/tree/fix-issue-400 (placeholder until commits land).
 
-**Review:** [Self-review checklist - does it follow the project's contribution guidelines?]
+**Review:** Self-review against `docs/developer/contributor-guide.md`:
+conventional-commit messages; `pre-commit run --all-files` (ruff/black/isort, line
+length 119); use `ParallelState` instead of direct `mpu.get_*`; use
+`load_hf_config` / `load_tokenizer` instead of bare `AutoConfig`/`AutoTokenizer`.
+Run the PR checklist (pre-commit green, tests added, `python3 train.py --help`
+parses if any flag is added).
 
-**Evaluate:** [How will you verify it works?]
+**Evaluate:** the new single-GPU test passes; generated tokens match a reference
+within tolerance; `pytest tests/fast -x` stays green; optionally an equivalence
+check vs SGLang following `test_chat_input_ids_equivalence.py`.
 
 ---
 
@@ -118,26 +253,40 @@ Using UMPIRE framework (adapted):
 
 ### Unit Tests
 
-- [ ] Test case 1: [Description]
-- [ ] Test case 2: [Description]
-- [ ] Test case 3: [Description]
+- [ ] CPU/`tests/fast`: wiring/argument test if any new flag is added.
+- [ ] Small-model construction of the Megatron inference engine (no generation).
 
 ### Integration Tests
 
-- [ ] Integration scenario 1
-- [ ] Integration scenario 2
+- [ ] `tests/e2e/megatron/`: single-GPU, tiny-model generation via the Megatron
+      inference engine (greedy first), registered with `register_cuda_ci`.
+- [ ] (Optional) Output-equivalence cross-check vs a reference (HF or SGLang).
 
 ### Manual Testing
 
-[What you tested manually and results]
+The single-GPU smoke test (`w2/repro/megatron_inference_smoke.py`) already drives
+the Megatron inference engine end-to-end in the `mega` env; the Phase III test will
+formalize this inside `tests/e2e/megatron/`.
 
 ---
 
 ## Implementation Notes
 
-### Week [X] Progress
+### Week 2 Progress
 
-[What you built this week, challenges faced, decisions made]
+- Synced fork to upstream (was 15 commits behind): web "Sync fork" for the remote,
+  `git merge --ff-only upstream/main` locally; created branch `fix-issue-400`.
+- Mapped the architecture: generation is SGLang-only; Megatron does training +
+  `forward_only` log-probs; no Megatron generation path exists.
+- Wrote a deterministic, dependency-free reproduction script
+  (`w2/repro/reproduce_issue_400.py`) that proves the gap (exit 0).
+- Built a working runtime in the `mega` conda env (Docker wasn't available),
+  mirroring the project Dockerfile with torch 2.11.0/cu130 + prebuilt cu13 wheels +
+  Megatron-LM `miles-main` + miles. Documented every pin and fix above.
+- Validated the plan by running Megatron's `megatron.core.inference` stack
+  standalone on one H100 (`w2/repro/megatron_inference_smoke.py`) — confirming the
+  contribution is integration, not building an engine.
+- Drafted the UMPIRE solution plan (minimal, test-first scope).
 
 ### Week [Y] Progress
 
@@ -145,9 +294,13 @@ Using UMPIRE framework (adapted):
 
 ### Code Changes
 
-- **Files modified:** [List]
+- **Files modified:** documentation + reproduction/smoke scripts only (no miles
+  source changes yet).
 - **Key commits:** [Links to important commits]
-- **Approach decisions:** [Why you chose certain approaches]
+- **Approach decisions:** planned Phase III files —
+  `miles/backends/megatron_utils/inference.py`,
+  `tests/e2e/megatron/test_megatron_inference_*.py`; stretch:
+  `miles/rollout/generate_hub/megatron_generate.py`, `miles/utils/arguments.py`.
 
 ---
 
@@ -183,6 +336,11 @@ Using UMPIRE framework (adapted):
 
 ## Resources Used
 
-- [Link to helpful documentation]
-- [Tutorial or Stack Overflow post that helped]
-- [GitHub issues or discussions that helped]
+- Issue #400: https://github.com/radixark/miles/issues/400
+- Megatron-LM inference stack: `megatron.core.inference` and its
+  `tests/unit_tests/test_inference.py`
+- miles contributor guide: `docs/developer/contributor-guide.md`
+- miles Dockerfile / CI (canonical environment recipe): `docker/Dockerfile`,
+  `.github/workflows/_run-ci.yml`
+- SGLang equivalence-test pattern:
+  `tests/e2e/sglang/test_chat_input_ids_equivalence.py`
