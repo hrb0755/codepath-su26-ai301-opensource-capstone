@@ -82,7 +82,8 @@ proxy in front of it.
 - `miles_plugins/models/hf_attention.py` — already imports
   `megatron.core.inference.contexts.BaseInferenceContext` as a *type*, so the model
   layers are already inference-context-aware (a useful building block).
-- `tests/e2e/megatron/` — where a new Megatron inference test would live.
+- `tests/fast/` and `tests/fast-gpu/` — where the new Megatron inference tests
+  live (CPU adapter unit tests and the single-GPU generation test).
 - `miles/router/` — SGLang reverse proxy (pattern to reuse for an endpoint later).
 
 ---
@@ -227,9 +228,12 @@ endpoint).
    → `StaticInferenceEngine`.
 2. Expose a minimal `generate(prompts, sampling_params)` helper returning
    tokens/text (greedy + basic temperature/top-p first).
-3. Add a single-GPU, tiny-model test under `tests/e2e/megatron/` (mirroring
-   upstream `test_inference.py`) that generates via the Megatron engine and
-   validates the output. Register it with `register_cuda_ci(...)`.
+3. Add a single-GPU, tiny-model test under `tests/fast-gpu/` (mirroring upstream
+   `test_inference.py`) that generates via the Megatron engine and validates the
+   output, plus CPU unit tests for the tokenizer adapter under `tests/fast/`.
+   Register the GPU test with `register_cuda_ci(...)`. (Chose `tests/fast-gpu/`
+   over `tests/e2e/megatron/` because the latter holds full training launches,
+   not in-process model tests.)
 4. Keep v1 at TP=1, PP=1, small model; document distributed generation and the
    OpenAI-compatible endpoint as explicit follow-ups.
 
