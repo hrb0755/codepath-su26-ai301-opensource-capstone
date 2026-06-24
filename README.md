@@ -4,7 +4,7 @@
 **Contribution Number:** 1  
 **Student:** Ruobing Han
 **Issue:** https://github.com/radixark/miles/issues/400  
-**Status:** Phase II Complete (Reproduce & Plan)
+**Status:** Phase III In Progress (Build)
 
 ---
 
@@ -253,20 +253,30 @@ check vs SGLang following `test_chat_input_ids_equivalence.py`.
 
 ### Unit Tests
 
-- [ ] CPU/`tests/fast`: wiring/argument test if any new flag is added.
-- [ ] Small-model construction of the Megatron inference engine (no generation).
+- [x] CPU (`tests/fast/backends/megatron_utils/test_megatron_inference_adapter.py`):
+      8 unit tests for the HF→Megatron tokenizer adapter and the tokenizer
+      dispatch helper — tokenize/detokenize/bos/eos/eod mapping, `skip_special_tokens`
+      forwarding, pass-through of Megatron-style tokenizers, and error cases.
+      All 8 pass locally (run with `--noconftest`, see Challenges). No GPU/Megatron
+      needed (the module defers Megatron imports), so these run in the CPU CI stage.
 
 ### Integration Tests
 
-- [ ] `tests/e2e/megatron/`: single-GPU, tiny-model generation via the Megatron
-      inference engine (greedy first), registered with `register_cuda_ci`.
-- [ ] (Optional) Output-equivalence cross-check vs a reference (HF or SGLang).
+- [x] GPU (`tests/fast-gpu/test_megatron_inference.py`): builds a tiny GPTModel
+      in-process (TP=PP=1), drives it through `build_inference_engine` + `generate`,
+      and asserts it returns the requested number of in-range tokens. Registered
+      with `register_cuda_ci(..., suite="stage-b-2-gpu-h200", labels=["megatron"])`.
+      Written and lint-clean; **GPU validation pending** (the shared cluster's GPUs
+      were fully occupied by another training job — see Challenges). The identical
+      engine path was already proven on an H100 in Phase II
+      (`w2/repro/megatron_inference_smoke.py`).
+- [ ] (Follow-up) Output-equivalence cross-check vs a reference (HF or SGLang).
 
 ### Manual Testing
 
-The single-GPU smoke test (`w2/repro/megatron_inference_smoke.py`) already drives
-the Megatron inference engine end-to-end in the `mega` env; the Phase III test will
-formalize this inside `tests/e2e/megatron/`.
+The Phase II single-GPU smoke test (`w2/repro/megatron_inference_smoke.py`) drove
+the same `megatron.core.inference` stack end-to-end on an H100. Phase III formalizes
+that into the in-repo test above, routed through the new `inference.py` module.
 
 ---
 
@@ -288,19 +298,54 @@ formalize this inside `tests/e2e/megatron/`.
   contribution is integration, not building an engine.
 - Drafted the UMPIRE solution plan (minimal, test-first scope).
 
-### Week [Y] Progress
+### Week 3 Progress (Phase III: Build)
 
-[Continue documenting as you work]
+**What I built:**
+- Added `miles/backends/megatron_utils/inference.py` — drives a miles-built
+  Megatron `GPTModel` through Megatron-LM's own inference stack
+  (`GPTInferenceWrapper` → `TextGenerationController` → `StaticInferenceEngine`):
+  - `build_inference_engine(model, tokenizer, ...)` — unwraps the actor's
+    `list[DDP]` to the underlying `GPTModel`, derives `padded_vocab_size` /
+    `params_dtype`, assembles `InferenceWrapperConfig`, and returns a ready engine.
+  - `generate(engine, prompts, ...)` — thin wrapper over `engine.generate`.
+  - `HFTokenizerInferenceAdapter` — bridges miles' HuggingFace tokenizer
+    (`encode`/`decode`/`bos_token_id`/`eos_token_id`) to the
+    `tokenize`/`detokenize`/`bos`/`eod` interface the controller expects.
+  - Megatron imports are deferred into functions so the adapter is unit-testable
+    on CPU without Megatron installed.
+- Added CPU unit tests (8) and a single-GPU end-to-end generation test.
+
+**Challenges faced:**
+- The repo's root `tests/conftest.py` transitively `import sglang`, which I had
+  deliberately not installed (it isn't needed for Megatron-native inference). Any
+  plain `pytest` therefore fails at conftest import. Fix: run the CPU test with
+  `pytest --noconftest -o addopts=""` (it uses no conftest fixtures); the GPU test
+  also runs standalone via `python3` (the e2e convention). CI has sglang, so this
+  is a local-env-only workaround.
+- The HF tokenizer interface doesn't match what `TextGenerationController` calls
+  (`bos`/`eod`/`tokenize`/`detokenize`), so I wrote the small adapter above.
+- The shared cluster's 8 GPUs were fully occupied by another training job, so the
+  in-repo GPU test couldn't be run yet; the same engine path was already validated
+  on an H100 in Phase II.
+
+**Self-review:** `ruff` / `black` / `isort` clean on all three files; the
+`ban-mpu-get` and `ban-bare-auto-loaders` pre-commit hooks pass (no `mpu.get_*`,
+no bare `AutoConfig`/`AutoTokenizer`). Per-repo git identity set so commits are
+correctly attributed.
 
 ### Code Changes
 
-- **Files modified:** documentation + reproduction/smoke scripts only (no miles
-  source changes yet).
-- **Key commits:** [Links to important commits]
-- **Approach decisions:** planned Phase III files —
-  `miles/backends/megatron_utils/inference.py`,
-  `tests/e2e/megatron/test_megatron_inference_*.py`; stretch:
-  `miles/rollout/generate_hub/megatron_generate.py`, `miles/utils/arguments.py`.
+- **Files added:**
+  - `miles/backends/megatron_utils/inference.py` (engine + tokenizer adapter)
+  - `tests/fast/backends/megatron_utils/test_megatron_inference_adapter.py` (CPU)
+  - `tests/fast-gpu/test_megatron_inference.py` (single-GPU e2e)
+- **Branch:** https://github.com/hrb0755/miles/tree/fix-issue-400
+- **Key commit:** `feat(megatron): add Megatron inference engine for testing (#400)`
+  (`fe079e7ca`).
+- **Approach decisions:** kept the first PR focused on a standalone, testable
+  engine builder rather than also wiring the actor/CLI/OpenAI-endpoint, which are
+  noted as follow-ups; reused miles' training tokenizer via an adapter for
+  consistency; scoped v1 to TP=PP=1.
 
 ---
 
