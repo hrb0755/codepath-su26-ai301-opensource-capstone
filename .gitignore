@@ -2,6 +2,9 @@ CLAUDE.md
 .env
 w1/
 
+# CodePath assignment description PDFs (not ours to publish)
+*_desc.pdf
+
 # General macOS files
 .DS_Store
 .localized
